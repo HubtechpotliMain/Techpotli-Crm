@@ -1042,6 +1042,13 @@ model Invoice {
   gstRate       Decimal       @default(18) @db.Decimal(5, 2)
   gstAmount     Decimal       @db.Decimal(12, 2)
   grandTotal    Decimal       @db.Decimal(12, 2)
+  taxType       String        @default("IGST") // CGST_SGST | IGST
+  placeOfSupply String?
+  cgstAmount    Decimal       @default(0) @db.Decimal(12, 2)
+  sgstAmount    Decimal       @default(0) @db.Decimal(12, 2)
+  igstAmount    Decimal       @default(0) @db.Decimal(12, 2)
+  hsnSac        String        @default("998314")
+  shipTo        Json?
   status        InvoiceStatus @default(DRAFT)
   pdfUrl        String?
   emailSentAt   DateTime?

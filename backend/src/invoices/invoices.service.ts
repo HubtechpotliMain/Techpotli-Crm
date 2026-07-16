@@ -4,13 +4,31 @@ import { Queue } from 'bullmq';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NumberSequenceService } from '../common/number-sequence.service';
-import { PdfService } from '../pdf/pdf.service';
+import { PdfService, type ShipToSnapshot } from '../pdf/pdf.service';
 import { S3Service } from '../uploads/s3.service';
 import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ActivityLogService } from '../activity-log/activity-log.service';
 import { buildInvoiceEmailHtml } from '../mail/templates/invoice-email.template';
 import { EventPublisherService } from '../events/event-publisher.service';
+import {
+  computeInvoiceTax,
+  displayStateName,
+  gstStateCode,
+  isDelhiState,
+} from '../common/utils/gst-place.util';
+
+export type CreateInvoiceInput = {
+  customerId: string;
+  lineItems: unknown[];
+  dueDate: Date;
+  notes?: string;
+  /** When set, overrides auto-detect from customer.state */
+  isDelhi?: boolean;
+  shipTo?: ShipToSnapshot;
+  /** @deprecated ignored — tax is always 18% split by place of supply */
+  gstRate?: number;
+};
 
 @Injectable()
 export class InvoicesService {
@@ -67,7 +85,6 @@ export class InvoicesService {
     return { ...invoice, pdfViewUrl };
   }
 
-  /** Turn stored pdfUrl (S3 key, legacy local path, or old signed URL) into a browser-openable URL. */
   async resolvePdfViewUrl(pdfUrl: string | null | undefined): Promise<string | null> {
     if (!pdfUrl) return null;
 
@@ -102,15 +119,48 @@ export class InvoicesService {
     return null;
   }
 
-  async create(data: { customerId: string; lineItems: unknown[]; dueDate: Date; notes?: string; gstRate?: number }, createdById: string) {
+  private buildShipTo(
+    customer: {
+      companyName: string;
+      ownerName?: string | null;
+      phone?: string | null;
+      address?: string | null;
+      state?: string | null;
+      pincode?: string | null;
+    },
+    override?: ShipToSnapshot,
+  ): ShipToSnapshot {
+    const state = override?.state ?? customer.state ?? undefined;
+    return {
+      companyName: override?.companyName ?? customer.companyName,
+      contactName: override?.contactName ?? customer.ownerName ?? undefined,
+      phone: override?.phone ?? customer.phone ?? undefined,
+      address: override?.address ?? customer.address ?? undefined,
+      state: displayStateName(state) || state,
+      stateCode: override?.stateCode || gstStateCode(state) || undefined,
+      pincode: override?.pincode ?? customer.pincode ?? undefined,
+    };
+  }
+
+  async create(data: CreateInvoiceInput, createdById: string) {
     const customer = await this.prisma.customer.findUnique({ where: { id: data.customerId } });
-    const settings = await this.prisma.systemSettings.findUnique({ where: { id: 'default' } });
-    const gstRate = data.gstRate ?? Number(settings?.gstRate ?? 18);
+    if (!customer) throw new NotFoundException('Customer not found');
+
     const lineItems = data.lineItems as Array<{ name: string; qty: number; rate: number; amount: number }>;
-    const subtotal = lineItems.reduce((s, i) => s + i.amount, 0);
-    const gstAmount = Math.round(subtotal * gstRate) / 100;
-    const grandTotal = subtotal + gstAmount;
-    const invoiceNumber = await this.numbers.next('INV');
+    if (!lineItems?.length) throw new BadRequestException('Add at least one line item');
+
+    const subtotal = lineItems.reduce((s, i) => s + Number(i.amount), 0);
+    const delhi =
+      typeof data.isDelhi === 'boolean' ? data.isDelhi : isDelhiState(customer.state);
+    const tax = computeInvoiceTax(subtotal, delhi);
+    const placeOfSupply =
+      tax.placeOfSupply || displayStateName(data.shipTo?.state || customer.state) || customer.state || null;
+    const shipTo = this.buildShipTo(customer, data.shipTo);
+    if (!shipTo.stateCode && placeOfSupply) {
+      shipTo.stateCode = gstStateCode(placeOfSupply) || undefined;
+    }
+
+    const invoiceNumber = await this.numbers.nextInvoiceNumber();
 
     const invoice = await this.prisma.invoice.create({
       data: {
@@ -119,9 +169,16 @@ export class InvoicesService {
         dueDate: data.dueDate,
         lineItems,
         subtotal,
-        gstRate,
-        gstAmount,
-        grandTotal,
+        gstRate: tax.gstRate,
+        gstAmount: tax.gstAmount,
+        grandTotal: tax.grandTotal,
+        taxType: tax.taxType,
+        placeOfSupply,
+        cgstAmount: tax.cgstAmount,
+        sgstAmount: tax.sgstAmount,
+        igstAmount: tax.igstAmount,
+        hsnSac: '998314',
+        shipTo: shipTo as unknown as Prisma.InputJsonValue,
         notes: data.notes,
         createdById,
       },
@@ -155,7 +212,7 @@ export class InvoicesService {
       return { ...result, pdfJobId: job.id, pdfStatus: 'queued' as const };
     }
 
-    const pdfBuffer = await this.buildInvoicePdfBuffer(invoice, customer, lineItems, gstRate, subtotal, gstAmount, grandTotal);
+    const pdfBuffer = await this.buildInvoicePdfBuffer(invoice);
     const upload = await this.s3.upload(pdfBuffer, `${invoiceNumber}.pdf`, 'application/pdf', 'invoices');
     await this.prisma.invoice.update({ where: { id: invoice.id }, data: { pdfUrl: upload.key } });
 
@@ -179,16 +236,30 @@ export class InvoicesService {
     if (customer?.email) {
       try {
         await this.deliverInvoiceEmail(invoice, pdfBuffer);
-      } catch (err) {
-        // Invoice is created even if email fails — user can resend from detail page
+      } catch {
+        // Invoice is created even if email fails
       }
     }
     return this.findOne(invoice.id);
   }
 
-  private async buildInvoicePdfBuffer(
-    invoice: { invoiceNumber: string; invoiceDate: Date; dueDate: Date },
-    customer: {
+  private async buildInvoicePdfBuffer(invoice: {
+    invoiceNumber: string;
+    invoiceDate: Date;
+    dueDate: Date;
+    lineItems: unknown;
+    subtotal: unknown;
+    gstRate: unknown;
+    gstAmount: unknown;
+    grandTotal: unknown;
+    taxType?: string | null;
+    cgstAmount?: unknown;
+    sgstAmount?: unknown;
+    igstAmount?: unknown;
+    hsnSac?: string | null;
+    placeOfSupply?: string | null;
+    shipTo?: unknown;
+    customer?: {
       companyName?: string | null;
       ownerName?: string | null;
       phone?: string | null;
@@ -197,32 +268,43 @@ export class InvoicesService {
       state?: string | null;
       pincode?: string | null;
       gstNumber?: string | null;
-    } | null | undefined,
-    lineItems: Array<{ name: string; qty: number; rate: number; amount: number }>,
-    gstRate: number,
-    subtotal: number,
-    gstAmount: number,
-    grandTotal: number,
-  ) {
+    } | null;
+  }) {
+    const lineItems = invoice.lineItems as Array<{ name: string; qty: number; rate: number; amount: number }>;
+    const shipTo = (invoice.shipTo as ShipToSnapshot | null) || undefined;
+    const taxType =
+      invoice.taxType === 'CGST_SGST' || invoice.taxType === 'IGST'
+        ? invoice.taxType
+        : Number(invoice.igstAmount) > 0
+          ? 'IGST'
+          : 'CGST_SGST';
+
     return this.pdf.generateInvoicePdf({
       invoiceNumber: invoice.invoiceNumber,
       invoiceDate: invoice.invoiceDate,
       dueDate: invoice.dueDate,
       customer: {
-        companyName: customer?.companyName || '',
-        ownerName: customer?.ownerName,
-        phone: customer?.phone,
-        email: customer?.email,
-        address: customer?.address,
-        state: customer?.state,
-        pincode: customer?.pincode,
-        gstNumber: customer?.gstNumber,
+        companyName: invoice.customer?.companyName || '',
+        ownerName: invoice.customer?.ownerName,
+        phone: invoice.customer?.phone,
+        email: invoice.customer?.email,
+        address: invoice.customer?.address,
+        state: invoice.customer?.state,
+        pincode: invoice.customer?.pincode,
+        gstNumber: invoice.customer?.gstNumber,
       },
+      shipTo,
       lineItems,
-      subtotal: Number(subtotal),
-      gstAmount: Number(gstAmount),
-      grandTotal: Number(grandTotal),
-      gstRate,
+      subtotal: Number(invoice.subtotal),
+      gstAmount: Number(invoice.gstAmount),
+      grandTotal: Number(invoice.grandTotal),
+      gstRate: Number(invoice.gstRate),
+      taxType,
+      cgstAmount: Number(invoice.cgstAmount ?? 0),
+      sgstAmount: Number(invoice.sgstAmount ?? 0),
+      igstAmount: Number(invoice.igstAmount ?? 0),
+      hsnSac: invoice.hsnSac || '998314',
+      placeOfSupply: invoice.placeOfSupply,
     });
   }
 
@@ -256,6 +338,13 @@ export class InvoicesService {
     gstAmount: unknown;
     grandTotal: unknown;
     gstRate: unknown;
+    taxType?: string | null;
+    cgstAmount?: unknown;
+    sgstAmount?: unknown;
+    igstAmount?: unknown;
+    hsnSac?: string | null;
+    placeOfSupply?: string | null;
+    shipTo?: unknown;
     pdfUrl: string | null;
     customer?: {
       companyName?: string | null;
@@ -276,27 +365,7 @@ export class InvoicesService {
         /* regenerate below */
       }
     }
-    const lineItems = invoice.lineItems as Array<{ name: string; qty: number; rate: number; amount: number }>;
-    return this.pdf.generateInvoicePdf({
-      invoiceNumber: invoice.invoiceNumber,
-      invoiceDate: invoice.invoiceDate,
-      dueDate: invoice.dueDate,
-      customer: {
-        companyName: invoice.customer?.companyName || '',
-        ownerName: invoice.customer?.ownerName,
-        phone: invoice.customer?.phone,
-        email: invoice.customer?.email,
-        address: invoice.customer?.address,
-        state: invoice.customer?.state,
-        pincode: invoice.customer?.pincode,
-        gstNumber: invoice.customer?.gstNumber,
-      },
-      lineItems,
-      subtotal: Number(invoice.subtotal),
-      gstAmount: Number(invoice.gstAmount),
-      grandTotal: Number(invoice.grandTotal),
-      gstRate: Number(invoice.gstRate),
-    });
+    return this.buildInvoicePdfBuffer(invoice);
   }
 
   private async deliverInvoiceEmail(
@@ -359,16 +428,7 @@ export class InvoicesService {
     });
     if (!invoice) throw new NotFoundException('Invoice not found');
 
-    const lineItems = invoice.lineItems as Array<{ name: string; qty: number; rate: number; amount: number }>;
-    const pdfBuffer = await this.buildInvoicePdfBuffer(
-      invoice,
-      invoice.customer,
-      lineItems,
-      Number(invoice.gstRate),
-      Number(invoice.subtotal),
-      Number(invoice.gstAmount),
-      Number(invoice.grandTotal),
-    );
+    const pdfBuffer = await this.buildInvoicePdfBuffer(invoice);
     const oldKey = this.extractS3Key(invoice.pdfUrl);
     const upload = await this.s3.upload(pdfBuffer, `${invoice.invoiceNumber}.pdf`, 'application/pdf', 'invoices');
     if (oldKey && oldKey !== upload.key) {

@@ -2,35 +2,45 @@ import { Injectable } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import PDFDocument from 'pdfkit';
+import { amountInWordsINR } from '../common/utils/amount-in-words';
 
 type PdfDoc = InstanceType<typeof PDFDocument>;
 
 const COMPANY = {
   legalName: 'TECHPOTLI E-COMMERCE PRIVATE LIMITED',
-  tagline: 'TECH ON MAKES THINGS EASY',
-  phone: '+91 9211405666',
-  email: 'support@techpotli.in',
+  addressLines: [
+    'C-52-A LGF, Block C, Kalkaji',
+    'New Delhi, South Delhi - 110019',
+  ],
+  phone: '01147200987',
+  mobiles: '9911475599, 9911399733',
+  gstin: '07AAMCT2939C1Z9',
+  stateName: 'Delhi',
+  stateCode: '07',
+  email: 'support@techpotli.com',
   website: 'www.techpotli.com',
-  officeHours: 'Monday to Saturday\n10:00 AM – 6:00 PM',
 };
 
 const BANK = {
-  bankName: 'ICICI Bank',
-  accountName: 'Techpotli E-Commerce Private Limited',
-  accountNumber: '347605001436',
-  ifsc: 'ICIC0003476',
-  swift: 'ICICINBBCTS',
+  accountName: 'TECHPOTLI E-COMMERCE PRIVATE LIMITED',
+  bankName: 'Axis Bank',
+  accountNumber: '925020045561018',
+  branch: 'Nehru Enclave New Delhi 110019',
+  ifsc: 'UTIB0004813',
+  swift: '',
 };
 
-const TERMS = [
-  'Payment due within 15 days.',
-  'GST applicable as per Indian tax regulations.',
-  'Delayed payments may incur additional charges.',
-  'Services once delivered are non-refundable.',
-  'Domain, hosting and third-party charges are non-refundable.',
-];
+export type ShipToSnapshot = {
+  companyName?: string;
+  contactName?: string;
+  phone?: string;
+  address?: string;
+  state?: string;
+  stateCode?: string;
+  pincode?: string;
+};
 
-type InvoicePdfInput = {
+export type InvoicePdfInput = {
   invoiceNumber: string;
   invoiceDate: Date;
   dueDate: Date;
@@ -44,262 +54,388 @@ type InvoicePdfInput = {
     pincode?: string | null;
     gstNumber?: string | null;
   };
+  shipTo?: ShipToSnapshot | null;
   lineItems: Array<{ name: string; qty: number; rate: number; amount: number }>;
   subtotal: number;
-  discount?: number;
   gstRate: number;
   gstAmount: number;
   grandTotal: number;
+  taxType?: 'CGST_SGST' | 'IGST';
+  cgstAmount?: number;
+  sgstAmount?: number;
+  igstAmount?: number;
+  hsnSac?: string;
+  placeOfSupply?: string | null;
 };
 
 @Injectable()
 export class PdfService {
-  private logoPath() {
+  private assetPath(filename: string) {
     const candidates = [
-      path.join(process.cwd(), 'assets', 'techpotli-logo.png'),
-      path.join(__dirname, '..', '..', 'assets', 'techpotli-logo.png'),
-      path.join(__dirname, '..', '..', '..', 'assets', 'techpotli-logo.png'),
+      path.join(process.cwd(), 'assets', filename),
+      path.join(__dirname, '..', '..', 'assets', filename),
+      path.join(__dirname, '..', '..', '..', 'assets', filename),
     ];
     return candidates.find((p) => fs.existsSync(p));
   }
 
+  private logoPath() {
+    return this.assetPath('techpotli-logo.png');
+  }
+
+  private sealPath() {
+    return this.assetPath('techpotli-seal.png');
+  }
+
   private formatMoney(value: number) {
-    return `₹ ${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
   private formatDate(value: Date) {
     return value.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
   }
 
-  private drawRule(doc: PdfDoc, y: number, weight = 1) {
+  private drawRule(doc: PdfDoc, y: number, color = '#C9A227', weight = 0.8) {
     const { left, right } = doc.page.margins;
     const width = doc.page.width - left - right;
-    doc.save().lineWidth(weight).strokeColor('#1e3a8a').moveTo(left, y).lineTo(left + width, y).stroke().restore();
+    doc.save().lineWidth(weight).strokeColor(color).moveTo(left, y).lineTo(left + width, y).stroke().restore();
   }
 
-  private drawSectionTitle(doc: PdfDoc, title: string, y: number) {
-    doc.font('Helvetica-Bold').fontSize(10).fillColor('#1e3a8a').text(title, doc.page.margins.left, y);
-    return y + 16;
-  }
-
-  private ensureSpace(doc: PdfDoc, needed: number) {
-    const bottom = doc.page.height - doc.page.margins.bottom;
-    if (doc.y + needed > bottom) doc.addPage();
-  }
-
-  /** Label + value rows with dynamic height (fixes overlapping text). */
-  private drawFieldRows(
-    doc: PdfDoc,
-    startY: number,
-    left: number,
-    contentWidth: number,
-    fields: [string, string][],
-  ) {
-    const labelWidth = 118;
-    const valueWidth = contentWidth - labelWidth;
-    let y = startY;
-
-    for (const [label, value] of fields) {
-      const text = String(value || '—');
-      doc.font('Helvetica-Bold').fontSize(9);
-      const labelHeight = doc.heightOfString(`${label}:`, { width: labelWidth });
-      doc.text(`${label}:`, left, y, { width: labelWidth });
-
-      doc.font('Helvetica').fontSize(9);
-      const valueHeight = doc.heightOfString(text, { width: valueWidth });
-      doc.text(text, left + labelWidth, y, { width: valueWidth });
-
-      y += Math.max(labelHeight, valueHeight) + 8;
-    }
-
-    return y;
+  private drawWatermark(doc: PdfDoc) {
+    const logo = this.logoPath();
+    if (!logo) return;
+    const pageW = doc.page.width;
+    const pageH = doc.page.height;
+    const size = Math.min(pageW, pageH) * 0.55;
+    doc.save();
+    doc.opacity(0.08);
+    doc.image(logo, (pageW - size) / 2, (pageH - size) / 2, { width: size });
+    doc.restore();
   }
 
   async generateInvoicePdf(data: InvoicePdfInput): Promise<Buffer> {
     return new Promise((resolve, reject) => {
-      const doc = new PDFDocument({ margin: 45, size: 'A4' });
+      const doc = new PDFDocument({
+        margin: 36,
+        size: 'A4',
+        info: {
+          Title: `Invoice ${data.invoiceNumber}`,
+          Author: COMPANY.legalName,
+        },
+      });
       const chunks: Buffer[] = [];
       doc.on('data', (c) => chunks.push(c));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
+      this.drawWatermark(doc);
+
       const left = doc.page.margins.left;
       const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-      const discount = data.discount ?? 0;
-      const taxableAmount = data.subtotal - discount;
-      const halfGst = data.gstAmount / 2;
-      const halfRate = data.gstRate / 2;
+      const hsn = data.hsnSac || '998314';
+      const taxType = data.taxType || (data.igstAmount && data.igstAmount > 0 ? 'IGST' : 'CGST_SGST');
+      const cgst = Number(data.cgstAmount ?? (taxType === 'CGST_SGST' ? data.gstAmount / 2 : 0));
+      const sgst = Number(data.sgstAmount ?? (taxType === 'CGST_SGST' ? data.gstAmount / 2 : 0));
+      const igst = Number(data.igstAmount ?? (taxType === 'IGST' ? data.gstAmount : 0));
+
+      const ship = data.shipTo || {
+        companyName: data.customer.companyName,
+        contactName: data.customer.ownerName || undefined,
+        phone: data.customer.phone || undefined,
+        address: data.customer.address || undefined,
+        state: data.customer.state || undefined,
+        pincode: data.customer.pincode || undefined,
+      };
 
       let y = doc.page.margins.top;
       const logo = this.logoPath();
       if (logo) {
-        doc.image(logo, left, y, { width: 110 });
+        doc.image(logo, left, y, { width: 72 });
       }
 
-      doc
-        .font('Helvetica-Bold')
-        .fontSize(14)
-        .fillColor('#1e3a8a')
-        .text(COMPANY.legalName, left + (logo ? 120 : 0), y + 8, {
-          width: contentWidth - (logo ? 120 : 0),
-          align: logo ? 'left' : 'center',
-        });
-      doc
-        .font('Helvetica')
-        .fontSize(9)
-        .fillColor('#64748b')
-        .text(COMPANY.tagline, left + (logo ? 120 : 0), y + 28, {
-          width: contentWidth - (logo ? 120 : 0),
-          align: logo ? 'left' : 'center',
-        });
+      const headerX = left + (logo ? 82 : 0);
+      const headerW = contentWidth - (logo ? 82 : 0);
+      doc.font('Helvetica-Bold').fontSize(11).fillColor('#1A1A1A').text(COMPANY.legalName, headerX, y, {
+        width: headerW,
+      });
+      doc.font('Helvetica').fontSize(7.5).fillColor('#444444');
+      let hy = y + 14;
+      for (const line of COMPANY.addressLines) {
+        doc.text(line, headerX, hy, { width: headerW });
+        hy += 10;
+      }
+      doc.text(`Ph: ${COMPANY.phone}  ·  Mob: ${COMPANY.mobiles}`, headerX, hy, { width: headerW });
+      hy += 10;
+      doc.text(`GSTIN/UIN: ${COMPANY.gstin}  ·  State: ${COMPANY.stateName}, Code: ${COMPANY.stateCode}`, headerX, hy, {
+        width: headerW,
+      });
 
-      y += logo ? 72 : 48;
-      this.drawRule(doc, y, 2);
+      y = Math.max(y + 78, hy + 14);
+      this.drawRule(doc, y, '#C9A227', 1.5);
+      y += 8;
+
+      doc.font('Helvetica-Bold').fontSize(12).fillColor('#1A1A1A').text('TAX INVOICE', left, y, {
+        width: contentWidth,
+        align: 'center',
+      });
+      y += 16;
+
+      doc.font('Helvetica').fontSize(8).fillColor('#1A1A1A');
+      const metaW = contentWidth / 3;
+      doc.text(`Invoice No: ${data.invoiceNumber}`, left, y, { width: metaW });
+      doc.text(`Date: ${this.formatDate(data.invoiceDate)}`, left + metaW, y, { width: metaW });
+      doc.text(`Due: ${this.formatDate(data.dueDate)}`, left + metaW * 2, y, { width: metaW, align: 'right' });
       y += 14;
-
-      doc.font('Helvetica').fontSize(9).fillColor('#0f172a');
-      const metaCol = contentWidth / 3;
-      doc.text(`Invoice No: ${data.invoiceNumber}`, left, y, { width: metaCol });
-      doc.text(`Invoice Date: ${this.formatDate(data.invoiceDate)}`, left + metaCol, y, { width: metaCol });
-      doc.text(`Due Date: ${this.formatDate(data.dueDate)}`, left + metaCol * 2, y, { width: metaCol, align: 'right' });
-      y += 22;
       this.drawRule(doc, y);
-      y += 14;
+      y += 8;
 
-      y = this.drawSectionTitle(doc, 'BILL TO', y);
-      doc.fillColor('#0f172a');
-      y = this.drawFieldRows(doc, y, left, contentWidth, [
-        ['Company Name', data.customer.companyName || '—'],
-        ['Owner Name', data.customer.ownerName || '—'],
-        ['Mobile Number', data.customer.phone || '—'],
-        ['Email Address', data.customer.email || '—'],
-        ['Address', data.customer.address || '—'],
-        ['State', data.customer.state || '—'],
-        ['Pincode', data.customer.pincode || '—'],
-        ['GST Number', data.customer.gstNumber || '—'],
-      ]);
+      // Consignee
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#9A7B2F').text('Consignee (Ship to)', left, y);
+      y += 12;
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('#1A1A1A').text(ship.companyName || data.customer.companyName || '—', left, y, {
+        width: contentWidth,
+      });
+      y += 11;
+      doc.font('Helvetica').fontSize(8).fillColor('#333333');
+      if (ship.contactName || ship.phone) {
+        doc.text([ship.contactName, ship.phone].filter(Boolean).join(' — '), left, y, { width: contentWidth });
+        y += 10;
+      }
+      if (ship.address) {
+        const addrH = doc.heightOfString(ship.address, { width: contentWidth });
+        doc.text(ship.address, left, y, { width: contentWidth });
+        y += addrH + 4;
+      }
+      const stateLine = [
+        ship.state ? `State Name: ${ship.state}` : '',
+        ship.stateCode ? `Code: ${ship.stateCode}` : '',
+        ship.pincode ? `PIN: ${ship.pincode}` : '',
+      ]
+        .filter(Boolean)
+        .join(', ');
+      if (stateLine) {
+        doc.text(stateLine, left, y, { width: contentWidth });
+        y += 10;
+      }
+      if (data.customer.gstNumber) {
+        doc.text(`Buyer GSTIN: ${data.customer.gstNumber}`, left, y, { width: contentWidth });
+        y += 10;
+      }
+      if (data.placeOfSupply) {
+        doc.text(`Place of Supply: ${data.placeOfSupply}`, left, y, { width: contentWidth });
+        y += 10;
+      }
 
-      y += 6;
+      y += 4;
       this.drawRule(doc, y);
-      y += 14;
-      y = this.drawSectionTitle(doc, 'SERVICE DETAILS', y);
+      y += 8;
 
+      // Line items
       const cols = [
-        { label: 'Sr', width: 28, align: 'center' as const },
-        { label: 'Description', width: contentWidth - 28 - 45 - 70 - 80 },
-        { label: 'Qty', width: 45, align: 'center' as const },
-        { label: 'Rate', width: 70, align: 'right' as const },
-        { label: 'Amount', width: 80, align: 'right' as const },
+        { label: '#', width: 22, align: 'center' as const },
+        { label: 'Description of Services', width: contentWidth - 22 - 36 - 36 - 58 - 68 },
+        { label: 'HSN', width: 36, align: 'center' as const },
+        { label: 'Qty', width: 36, align: 'center' as const },
+        { label: 'Rate', width: 58, align: 'right' as const },
+        { label: 'Amount', width: 68, align: 'right' as const },
       ];
 
+      doc.rect(left, y, contentWidth, 16).fill('#FDF8EE');
+      doc.fillColor('#9A7B2F').font('Helvetica-Bold').fontSize(7);
       let x = left;
-      doc.rect(left, y, contentWidth, 18).fill('#eff6ff');
-      doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(8);
       for (const col of cols) {
-        doc.text(col.label, x + 4, y + 5, { width: col.width - 8, align: col.align });
+        doc.text(col.label, x + 2, y + 4, { width: col.width - 4, align: col.align });
         x += col.width;
       }
-      y += 20;
+      y += 18;
 
-      doc.font('Helvetica').fontSize(8).fillColor('#0f172a');
+      doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
       data.lineItems.forEach((item, index) => {
-        this.ensureSpace(doc, 18);
+        const descH = Math.max(12, doc.heightOfString(item.name, { width: cols[1].width - 4 }));
         if (index % 2 === 0) {
-          doc.rect(left, y - 2, contentWidth, 16).fill('#f8fafc');
-          doc.fillColor('#0f172a');
+          doc.rect(left, y - 1, contentWidth, descH + 4).fill('#FAFAF8');
+          doc.fillColor('#1A1A1A');
         }
         x = left;
         const row = [
           String(index + 1),
           item.name,
+          hsn,
           String(item.qty),
           this.formatMoney(item.rate),
           this.formatMoney(item.amount),
         ];
         cols.forEach((col, i) => {
-          doc.text(row[i], x + 4, y, { width: col.width - 8, align: col.align });
+          doc.text(row[i], x + 2, y, { width: col.width - 4, align: col.align });
           x += col.width;
         });
-        y += 16;
+        y += descH + 4;
       });
 
-      y += 10;
+      y += 4;
       this.drawRule(doc, y);
-      y += 14;
+      y += 6;
 
-      const totalsX = left + contentWidth * 0.52;
-      const totalsLabelWidth = contentWidth * 0.28;
-      const totalsValueWidth = contentWidth * 0.2;
-      const totals: [string, string][] = [
-        ['Subtotal', this.formatMoney(data.subtotal)],
-        ['Discount', this.formatMoney(discount)],
-        ['Taxable Amount', this.formatMoney(taxableAmount)],
-        [`CGST (${halfRate}%)`, this.formatMoney(halfGst)],
-        [`SGST (${halfRate}%)`, this.formatMoney(halfGst)],
-      ];
+      // Tax summary table
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#9A7B2F').text('Tax Summary', left, y);
+      y += 12;
 
-      doc.font('Helvetica').fontSize(9);
-      for (const [label, value] of totals) {
-        doc.text(label, totalsX, y, { width: totalsLabelWidth });
-        doc.text(value, totalsX + totalsLabelWidth, y, { width: totalsValueWidth, align: 'right' });
+      if (taxType === 'IGST') {
+        const taxCols = [
+          { label: 'HSN/SAC', w: 55 },
+          { label: 'Taxable Value', w: 90 },
+          { label: 'IGST Rate', w: 55 },
+          { label: 'IGST Amount', w: 80 },
+          { label: 'Total', w: contentWidth - 55 - 90 - 55 - 80 },
+        ];
+        doc.rect(left, y, contentWidth, 14).fill('#FDF8EE');
+        doc.fillColor('#9A7B2F').font('Helvetica-Bold').fontSize(7);
+        x = left;
+        for (const c of taxCols) {
+          doc.text(c.label, x + 2, y + 3, { width: c.w - 4, align: 'center' });
+          x += c.w;
+        }
+        y += 16;
+        doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
+        x = left;
+        const taxRow = [hsn, this.formatMoney(data.subtotal), '18%', this.formatMoney(igst), this.formatMoney(data.grandTotal)];
+        taxCols.forEach((c, i) => {
+          doc.text(taxRow[i], x + 2, y, { width: c.w - 4, align: 'right' });
+          x += c.w;
+        });
+        y += 14;
+      } else {
+        const taxCols = [
+          { label: 'HSN/SAC', w: 48 },
+          { label: 'Taxable', w: 70 },
+          { label: 'CGST%', w: 40 },
+          { label: 'CGST Amt', w: 60 },
+          { label: 'SGST%', w: 40 },
+          { label: 'SGST Amt', w: 60 },
+          { label: 'Total', w: contentWidth - 48 - 70 - 40 - 60 - 40 - 60 },
+        ];
+        doc.rect(left, y, contentWidth, 14).fill('#FDF8EE');
+        doc.fillColor('#9A7B2F').font('Helvetica-Bold').fontSize(7);
+        x = left;
+        for (const c of taxCols) {
+          doc.text(c.label, x + 2, y + 3, { width: c.w - 4, align: 'center' });
+          x += c.w;
+        }
+        y += 16;
+        doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
+        x = left;
+        const taxRow = [
+          hsn,
+          this.formatMoney(data.subtotal),
+          '9%',
+          this.formatMoney(cgst),
+          '9%',
+          this.formatMoney(sgst),
+          this.formatMoney(data.grandTotal),
+        ];
+        taxCols.forEach((c, i) => {
+          doc.text(taxRow[i], x + 2, y, { width: c.w - 4, align: 'right' });
+          x += c.w;
+        });
         y += 14;
       }
 
       y += 4;
-      this.drawRule(doc, y, 1.5);
-      y += 10;
-      doc.font('Helvetica-Bold').fontSize(11).fillColor('#1e3a8a');
-      doc.text('GRAND TOTAL', totalsX, y, { width: totalsLabelWidth });
-      doc.text(this.formatMoney(data.grandTotal), totalsX + totalsLabelWidth, y, {
-        width: totalsValueWidth,
-        align: 'right',
-      });
-      y += 24;
-      this.drawRule(doc, y);
-      y += 14;
-
-      this.ensureSpace(doc, 180);
-      y = this.drawSectionTitle(doc, 'BANK DETAILS', y);
-      doc.fillColor('#0f172a');
-      y = this.drawFieldRows(doc, y, left, contentWidth, [
-        ['Bank Name', BANK.bankName],
-        ['Account Name', BANK.accountName],
-        ['Account Number', BANK.accountNumber],
-        ['IFSC Code', BANK.ifsc],
-        ['SWIFT Code', BANK.swift],
-      ]);
-
-      y += 6;
-      this.drawRule(doc, y);
-      y += 14;
-      y = this.drawSectionTitle(doc, 'COMPANY DETAILS', y);
-      doc.font('Helvetica-Bold').fontSize(9).text(COMPANY.legalName, left, y);
-      y += 14;
-      doc.font('Helvetica').fontSize(9);
-      y = this.drawFieldRows(doc, y, left, contentWidth, [
-        ['Customer Care', COMPANY.phone],
-        ['Email', COMPANY.email],
-        ['Website', COMPANY.website],
-        ['Office Hours', COMPANY.officeHours.replace('\n', ' · ')],
-      ]);
+      this.drawRule(doc, y, '#C9A227', 1.2);
       y += 8;
 
-      this.drawRule(doc, y);
-      y += 14;
-      y = this.drawSectionTitle(doc, 'TERMS & CONDITIONS', y);
-      doc.font('Helvetica').fontSize(8).fillColor('#334155');
-      TERMS.forEach((term, i) => {
-        doc.text(`${i + 1}. ${term}`, left, y, { width: contentWidth });
-        y += 12;
+      // Totals + words
+      const totalsX = left + contentWidth * 0.5;
+      doc.font('Helvetica').fontSize(8).fillColor('#1A1A1A');
+      doc.text('Taxable Amount', totalsX, y, { width: contentWidth * 0.28 });
+      doc.text(this.formatMoney(data.subtotal), totalsX + contentWidth * 0.28, y, {
+        width: contentWidth * 0.22,
+        align: 'right',
       });
+      y += 11;
+      if (taxType === 'IGST') {
+        doc.text('IGST @ 18%', totalsX, y, { width: contentWidth * 0.28 });
+        doc.text(this.formatMoney(igst), totalsX + contentWidth * 0.28, y, {
+          width: contentWidth * 0.22,
+          align: 'right',
+        });
+      } else {
+        doc.text('CGST @ 9%', totalsX, y, { width: contentWidth * 0.28 });
+        doc.text(this.formatMoney(cgst), totalsX + contentWidth * 0.28, y, {
+          width: contentWidth * 0.22,
+          align: 'right',
+        });
+        y += 11;
+        doc.text('SGST @ 9%', totalsX, y, { width: contentWidth * 0.28 });
+        doc.text(this.formatMoney(sgst), totalsX + contentWidth * 0.28, y, {
+          width: contentWidth * 0.22,
+          align: 'right',
+        });
+      }
+      y += 12;
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#1A1A1A');
+      doc.text('Grand Total', totalsX, y, { width: contentWidth * 0.28 });
+      doc.text(`₹ ${this.formatMoney(data.grandTotal)}`, totalsX + contentWidth * 0.28, y, {
+        width: contentWidth * 0.22,
+        align: 'right',
+      });
+      y += 14;
 
-      y += 20;
+      doc.font('Helvetica').fontSize(7.5).fillColor('#333333');
+      doc.text(`Amount Chargeable (in words) E. & O.E`, left, y);
+      y += 10;
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#1A1A1A').text(amountInWordsINR(data.grandTotal), left, y, {
+        width: contentWidth,
+      });
+      y += 12;
+      doc.font('Helvetica').fontSize(7.5).fillColor('#333333').text('Tax Amount (in words):', left, y);
+      y += 10;
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#1A1A1A').text(amountInWordsINR(data.gstAmount), left, y, {
+        width: contentWidth,
+      });
+      y += 14;
       this.drawRule(doc, y);
-      y += 28;
-      doc.font('Helvetica').fontSize(9).fillColor('#0f172a');
-      doc.text('Authorized Signatory', left, y);
-      y += 36;
-      doc.font('Helvetica-Bold').text(COMPANY.legalName, left, y);
+      y += 8;
+
+      // Bank
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#9A7B2F').text("Company's Bank Details", left, y);
+      y += 11;
+      doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
+      const bankLines: [string, string][] = [
+        ["A/c Holder's Name", BANK.accountName],
+        ['Bank Name', BANK.bankName],
+        ['A/c No.', BANK.accountNumber],
+        ['Branch & IFS Code', `${BANK.branch} & ${BANK.ifsc}`],
+      ];
+      if (BANK.swift) bankLines.push(['SWIFT Code', BANK.swift]);
+      for (const [label, value] of bankLines) {
+        doc.font('Helvetica-Bold').text(`${label}:`, left, y, { continued: true, width: 120 });
+        doc.font('Helvetica').text(` ${value}`);
+        y += 10;
+      }
+
+      y += 8;
+      this.drawRule(doc, y);
+      y += 10;
+
+      // Signatory + seal
+      const signX = left + contentWidth * 0.55;
+      doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
+      doc.text(`for ${COMPANY.legalName}`, signX, y, { width: contentWidth * 0.45, align: 'center' });
+
+      const seal = this.sealPath();
+      if (seal) {
+        const sealSize = 72;
+        doc.image(seal, signX + (contentWidth * 0.45 - sealSize) / 2, y + 12, { width: sealSize });
+        y += sealSize + 18;
+      } else {
+        y += 50;
+      }
+
+      doc.font('Helvetica-Bold').fontSize(8).text('Authorised Signatory', signX, y, {
+        width: contentWidth * 0.45,
+        align: 'center',
+      });
 
       doc.end();
     });

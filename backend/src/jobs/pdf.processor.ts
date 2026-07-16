@@ -2,7 +2,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
-import { PdfService } from '../pdf/pdf.service';
+import { PdfService, type ShipToSnapshot } from '../pdf/pdf.service';
 import { S3Service } from '../uploads/s3.service';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
 
@@ -38,6 +38,13 @@ export class PdfProcessor extends WorkerHost {
     }
 
     const lineItems = invoice.lineItems as Array<{ name: string; qty: number; rate: number; amount: number }>;
+    const taxType =
+      invoice.taxType === 'CGST_SGST' || invoice.taxType === 'IGST'
+        ? invoice.taxType
+        : Number(invoice.igstAmount) > 0
+          ? 'IGST'
+          : 'CGST_SGST';
+
     const pdfBuffer = await this.pdf.generateInvoicePdf({
       invoiceNumber: invoice.invoiceNumber,
       invoiceDate: invoice.invoiceDate,
@@ -52,11 +59,18 @@ export class PdfProcessor extends WorkerHost {
         pincode: invoice.customer?.pincode,
         gstNumber: invoice.customer?.gstNumber,
       },
+      shipTo: (invoice.shipTo as ShipToSnapshot | null) || undefined,
       lineItems,
       subtotal: Number(invoice.subtotal),
       gstAmount: Number(invoice.gstAmount),
       grandTotal: Number(invoice.grandTotal),
       gstRate: Number(invoice.gstRate),
+      taxType,
+      cgstAmount: Number(invoice.cgstAmount ?? 0),
+      sgstAmount: Number(invoice.sgstAmount ?? 0),
+      igstAmount: Number(invoice.igstAmount ?? 0),
+      hsnSac: invoice.hsnSac || '998314',
+      placeOfSupply: invoice.placeOfSupply,
     });
 
     const upload = await this.s3.upload(

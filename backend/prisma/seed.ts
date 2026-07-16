@@ -102,7 +102,15 @@ async function main() {
     });
   }
 
+  // TEPL tax invoices: FY 2026-27 starts after external invoice 112
+  await prisma.numberSequence.upsert({
+    where: { prefix_year: { prefix: 'TEPL', year: 2026 } },
+    update: {},
+    create: { prefix: 'TEPL', year: 2026, lastNumber: 112 },
+  });
+
   console.log(`Number sequences initialized for ${CURRENT_YEAR}: ${NUMBER_PREFIXES.join(', ')}`);
+  console.log('TEPL invoice sequence for FY 26-27 seeded at 112 (next = 113)');
   console.log('Seed completed successfully.');
 }
 
