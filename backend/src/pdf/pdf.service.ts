@@ -73,18 +73,37 @@ export class PdfService {
   private assetPath(filename: string) {
     const candidates = [
       path.join(process.cwd(), 'assets', filename),
+      path.join(process.cwd(), 'backend', 'assets', filename),
       path.join(__dirname, '..', '..', 'assets', filename),
       path.join(__dirname, '..', '..', '..', 'assets', filename),
+      path.join(__dirname, 'assets', filename),
+      // Nest may copy to dist/assets next to compiled output
+      path.join(__dirname, '..', 'assets', filename),
     ];
-    return candidates.find((p) => fs.existsSync(p));
+    return candidates.find((p) => {
+      try {
+        return fs.existsSync(p) && fs.statSync(p).isFile();
+      } catch {
+        return false;
+      }
+    });
   }
 
   private logoPath() {
-    return this.assetPath('techpotli-logo.png');
+    return (
+      this.assetPath('techpotli-logo.png') ||
+      this.assetPath('techpotlilogo.png') ||
+      this.assetPath('techpotli-logo.PNG')
+    );
   }
 
   private sealPath() {
-    return this.assetPath('techpotli-seal.png');
+    return (
+      this.assetPath('techpotli-seal.png') ||
+      this.assetPath('techpotli-seal.PNG') ||
+      // Fallback: use logo as seal if stamp file missing
+      this.logoPath()
+    );
   }
 
   private formatMoney(value: number) {
@@ -101,16 +120,82 @@ export class PdfService {
     doc.save().lineWidth(weight).strokeColor(color).moveTo(left, y).lineTo(left + width, y).stroke().restore();
   }
 
+  /** Advance Y by the real wrapped height of a text block (prevents overlap). */
+  private drawWrappedText(
+    doc: PdfDoc,
+    text: string,
+    x: number,
+    y: number,
+    opts: { width: number; font?: string; size?: number; color?: string; align?: 'left' | 'center' | 'right' },
+  ) {
+    const font = opts.font ?? 'Helvetica';
+    const size = opts.size ?? 8;
+    const color = opts.color ?? '#1A1A1A';
+    doc.font(font).fontSize(size).fillColor(color);
+    const height = doc.heightOfString(text, { width: opts.width, align: opts.align });
+    doc.text(text, x, y, { width: opts.width, align: opts.align, lineBreak: true });
+    return y + height;
+  }
+
+  private drawLabelValue(
+    doc: PdfDoc,
+    label: string,
+    value: string,
+    x: number,
+    y: number,
+    contentWidth: number,
+  ) {
+    const labelWidth = 118;
+    const valueWidth = contentWidth - labelWidth - 8;
+    doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#1A1A1A');
+    const labelH = doc.heightOfString(`${label}:`, { width: labelWidth });
+    doc.text(`${label}:`, x, y, { width: labelWidth });
+
+    doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
+    const valueH = doc.heightOfString(value || '—', { width: valueWidth });
+    doc.text(value || '—', x + labelWidth + 4, y, { width: valueWidth, lineBreak: true });
+
+    return y + Math.max(labelH, valueH) + 6;
+  }
+
   private drawWatermark(doc: PdfDoc) {
     const logo = this.logoPath();
     if (!logo) return;
     const pageW = doc.page.width;
     const pageH = doc.page.height;
-    const size = Math.min(pageW, pageH) * 0.55;
+    const size = Math.min(pageW, pageH) * 0.5;
     doc.save();
-    doc.opacity(0.08);
-    doc.image(logo, (pageW - size) / 2, (pageH - size) / 2, { width: size });
+    doc.opacity(0.07);
+    try {
+      doc.image(logo, (pageW - size) / 2, (pageH - size) / 2, { width: size });
+    } catch {
+      /* ignore watermark failures */
+    }
     doc.restore();
+  }
+
+  private drawSealStamp(doc: PdfDoc, cx: number, cy: number, size: number) {
+    const seal = this.sealPath();
+    if (seal) {
+      try {
+        doc.opacity(1);
+        doc.image(seal, cx - size / 2, cy - size / 2, { fit: [size, size], align: 'center', valign: 'center' });
+        return true;
+      } catch {
+        /* fall through to vector stamp */
+      }
+    }
+    // Vector fallback stamp so signatory is never blank
+    doc.save();
+    doc.lineWidth(1.5).strokeColor('#9A7B2F');
+    doc.circle(cx, cy, size / 2 - 2).stroke();
+    doc.lineWidth(0.8).circle(cx, cy, size / 2 - 8).stroke();
+    doc.font('Helvetica-Bold').fontSize(6).fillColor('#9A7B2F');
+    doc.text('TECHPOTLI', cx - size / 2 + 6, cy - 10, { width: size - 12, align: 'center' });
+    doc.font('Helvetica').fontSize(5);
+    doc.text('07AAMCT2939C1Z9', cx - size / 2 + 6, cy + 2, { width: size - 12, align: 'center' });
+    doc.restore();
+    return true;
   }
 
   async generateInvoicePdf(data: InvoicePdfInput): Promise<Buffer> {
@@ -118,6 +203,7 @@ export class PdfService {
       const doc = new PDFDocument({
         margin: 36,
         size: 'A4',
+        bufferPages: true,
         info: {
           Title: `Invoice ${data.invoiceNumber}`,
           Author: COMPANY.legalName,
@@ -149,28 +235,46 @@ export class PdfService {
 
       let y = doc.page.margins.top;
       const logo = this.logoPath();
+      const logoW = 90;
       if (logo) {
-        doc.image(logo, left, y, { width: 72 });
+        try {
+          doc.opacity(1);
+          doc.image(logo, left, y, { fit: [logoW, 48] });
+        } catch {
+          /* continue without header logo */
+        }
       }
 
-      const headerX = left + (logo ? 82 : 0);
-      const headerW = contentWidth - (logo ? 82 : 0);
-      doc.font('Helvetica-Bold').fontSize(11).fillColor('#1A1A1A').text(COMPANY.legalName, headerX, y, {
+      const headerX = left + (logo ? logoW + 12 : 0);
+      const headerW = contentWidth - (logo ? logoW + 12 : 0);
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#1A1A1A');
+      let hy = this.drawWrappedText(doc, COMPANY.legalName, headerX, y, {
         width: headerW,
+        font: 'Helvetica-Bold',
+        size: 10,
       });
-      doc.font('Helvetica').fontSize(7.5).fillColor('#444444');
-      let hy = y + 14;
+      hy += 2;
       for (const line of COMPANY.addressLines) {
-        doc.text(line, headerX, hy, { width: headerW });
-        hy += 10;
+        hy = this.drawWrappedText(doc, line, headerX, hy, {
+          width: headerW,
+          size: 7.5,
+          color: '#444444',
+        });
       }
-      doc.text(`Ph: ${COMPANY.phone}  ·  Mob: ${COMPANY.mobiles}`, headerX, hy, { width: headerW });
-      hy += 10;
-      doc.text(`GSTIN/UIN: ${COMPANY.gstin}  ·  State: ${COMPANY.stateName}, Code: ${COMPANY.stateCode}`, headerX, hy, {
+      hy = this.drawWrappedText(doc, `Ph: ${COMPANY.phone}  ·  Mob: ${COMPANY.mobiles}`, headerX, hy, {
         width: headerW,
+        size: 7.5,
+        color: '#444444',
       });
+      hy = this.drawWrappedText(
+        doc,
+        `GSTIN/UIN: ${COMPANY.gstin}  ·  State: ${COMPANY.stateName}, Code: ${COMPANY.stateCode}`,
+        headerX,
+        hy,
+        { width: headerW, size: 7.5, color: '#444444' },
+      );
 
-      y = Math.max(y + 78, hy + 14);
+      y = Math.max(y + 56, hy + 8);
       this.drawRule(doc, y, '#C9A227', 1.5);
       y += 8;
 
@@ -189,22 +293,31 @@ export class PdfService {
       this.drawRule(doc, y);
       y += 8;
 
-      // Consignee
       doc.font('Helvetica-Bold').fontSize(8).fillColor('#9A7B2F').text('Consignee (Ship to)', left, y);
       y += 12;
-      doc.font('Helvetica-Bold').fontSize(9).fillColor('#1A1A1A').text(ship.companyName || data.customer.companyName || '—', left, y, {
+      y = this.drawWrappedText(doc, ship.companyName || data.customer.companyName || '—', left, y, {
         width: contentWidth,
+        font: 'Helvetica-Bold',
+        size: 9,
       });
-      y += 11;
-      doc.font('Helvetica').fontSize(8).fillColor('#333333');
+      y += 2;
       if (ship.contactName || ship.phone) {
-        doc.text([ship.contactName, ship.phone].filter(Boolean).join(' — '), left, y, { width: contentWidth });
-        y += 10;
+        y = this.drawWrappedText(
+          doc,
+          [ship.contactName, ship.phone].filter(Boolean).join(' — '),
+          left,
+          y,
+          { width: contentWidth, size: 8, color: '#333333' },
+        );
+        y += 2;
       }
       if (ship.address) {
-        const addrH = doc.heightOfString(ship.address, { width: contentWidth });
-        doc.text(ship.address, left, y, { width: contentWidth });
-        y += addrH + 4;
+        y = this.drawWrappedText(doc, ship.address, left, y, {
+          width: contentWidth,
+          size: 8,
+          color: '#333333',
+        });
+        y += 2;
       }
       const stateLine = [
         ship.state ? `State Name: ${ship.state}` : '',
@@ -214,23 +327,30 @@ export class PdfService {
         .filter(Boolean)
         .join(', ');
       if (stateLine) {
-        doc.text(stateLine, left, y, { width: contentWidth });
-        y += 10;
+        y = this.drawWrappedText(doc, stateLine, left, y, { width: contentWidth, size: 8, color: '#333333' });
+        y += 2;
       }
       if (data.customer.gstNumber) {
-        doc.text(`Buyer GSTIN: ${data.customer.gstNumber}`, left, y, { width: contentWidth });
-        y += 10;
+        y = this.drawWrappedText(doc, `Buyer GSTIN: ${data.customer.gstNumber}`, left, y, {
+          width: contentWidth,
+          size: 8,
+          color: '#333333',
+        });
+        y += 2;
       }
       if (data.placeOfSupply) {
-        doc.text(`Place of Supply: ${data.placeOfSupply}`, left, y, { width: contentWidth });
-        y += 10;
+        y = this.drawWrappedText(doc, `Place of Supply: ${data.placeOfSupply}`, left, y, {
+          width: contentWidth,
+          size: 8,
+          color: '#333333',
+        });
+        y += 2;
       }
 
       y += 4;
       this.drawRule(doc, y);
       y += 8;
 
-      // Line items
       const cols = [
         { label: '#', width: 22, align: 'center' as const },
         { label: 'Description of Services', width: contentWidth - 22 - 36 - 36 - 58 - 68 },
@@ -251,6 +371,7 @@ export class PdfService {
 
       doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
       data.lineItems.forEach((item, index) => {
+        doc.font('Helvetica').fontSize(7.5);
         const descH = Math.max(12, doc.heightOfString(item.name, { width: cols[1].width - 4 }));
         if (index % 2 === 0) {
           doc.rect(left, y - 1, contentWidth, descH + 4).fill('#FAFAF8');
@@ -266,6 +387,7 @@ export class PdfService {
           this.formatMoney(item.amount),
         ];
         cols.forEach((col, i) => {
+          doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
           doc.text(row[i], x + 2, y, { width: col.width - 4, align: col.align });
           x += col.width;
         });
@@ -276,7 +398,6 @@ export class PdfService {
       this.drawRule(doc, y);
       y += 6;
 
-      // Tax summary table
       doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#9A7B2F').text('Tax Summary', left, y);
       y += 12;
 
@@ -344,96 +465,108 @@ export class PdfService {
       this.drawRule(doc, y, '#C9A227', 1.2);
       y += 8;
 
-      // Totals + words
       const totalsX = left + contentWidth * 0.5;
+      const totalsLabelW = contentWidth * 0.28;
+      const totalsValueW = contentWidth * 0.22;
       doc.font('Helvetica').fontSize(8).fillColor('#1A1A1A');
-      doc.text('Taxable Amount', totalsX, y, { width: contentWidth * 0.28 });
-      doc.text(this.formatMoney(data.subtotal), totalsX + contentWidth * 0.28, y, {
-        width: contentWidth * 0.22,
+      doc.text('Taxable Amount', totalsX, y, { width: totalsLabelW });
+      doc.text(this.formatMoney(data.subtotal), totalsX + totalsLabelW, y, {
+        width: totalsValueW,
         align: 'right',
       });
-      y += 11;
+      y += 12;
       if (taxType === 'IGST') {
-        doc.text('IGST @ 18%', totalsX, y, { width: contentWidth * 0.28 });
-        doc.text(this.formatMoney(igst), totalsX + contentWidth * 0.28, y, {
-          width: contentWidth * 0.22,
+        doc.text('IGST @ 18%', totalsX, y, { width: totalsLabelW });
+        doc.text(this.formatMoney(igst), totalsX + totalsLabelW, y, {
+          width: totalsValueW,
           align: 'right',
         });
       } else {
-        doc.text('CGST @ 9%', totalsX, y, { width: contentWidth * 0.28 });
-        doc.text(this.formatMoney(cgst), totalsX + contentWidth * 0.28, y, {
-          width: contentWidth * 0.22,
+        doc.text('CGST @ 9%', totalsX, y, { width: totalsLabelW });
+        doc.text(this.formatMoney(cgst), totalsX + totalsLabelW, y, {
+          width: totalsValueW,
           align: 'right',
         });
-        y += 11;
-        doc.text('SGST @ 9%', totalsX, y, { width: contentWidth * 0.28 });
-        doc.text(this.formatMoney(sgst), totalsX + contentWidth * 0.28, y, {
-          width: contentWidth * 0.22,
+        y += 12;
+        doc.text('SGST @ 9%', totalsX, y, { width: totalsLabelW });
+        doc.text(this.formatMoney(sgst), totalsX + totalsLabelW, y, {
+          width: totalsValueW,
           align: 'right',
         });
       }
-      y += 12;
+      y += 14;
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#1A1A1A');
-      doc.text('Grand Total', totalsX, y, { width: contentWidth * 0.28 });
-      doc.text(`₹ ${this.formatMoney(data.grandTotal)}`, totalsX + contentWidth * 0.28, y, {
-        width: contentWidth * 0.22,
+      doc.text('Grand Total', totalsX, y, { width: totalsLabelW });
+      doc.text(`₹ ${this.formatMoney(data.grandTotal)}`, totalsX + totalsLabelW, y, {
+        width: totalsValueW,
         align: 'right',
       });
-      y += 14;
+      y += 16;
 
-      doc.font('Helvetica').fontSize(7.5).fillColor('#333333');
-      doc.text(`Amount Chargeable (in words) E. & O.E`, left, y);
-      y += 10;
-      doc.font('Helvetica-Bold').fontSize(8).fillColor('#1A1A1A').text(amountInWordsINR(data.grandTotal), left, y, {
+      // Amount in words — use real wrapped heights (fixes overlap)
+      const chargeableWords = amountInWordsINR(data.grandTotal);
+      const taxWords = amountInWordsINR(data.gstAmount);
+
+      y = this.drawWrappedText(doc, 'Amount Chargeable (in words) E. & O.E', left, y, {
         width: contentWidth,
+        size: 7.5,
+        color: '#555555',
       });
-      y += 12;
-      doc.font('Helvetica').fontSize(7.5).fillColor('#333333').text('Tax Amount (in words):', left, y);
-      y += 10;
-      doc.font('Helvetica-Bold').fontSize(8).fillColor('#1A1A1A').text(amountInWordsINR(data.gstAmount), left, y, {
+      y += 3;
+      y = this.drawWrappedText(doc, chargeableWords, left, y, {
         width: contentWidth,
+        font: 'Helvetica-Bold',
+        size: 8,
+        color: '#1A1A1A',
       });
-      y += 14;
+      y += 8;
+      y = this.drawWrappedText(doc, 'Tax Amount (in words):', left, y, {
+        width: contentWidth,
+        size: 7.5,
+        color: '#555555',
+      });
+      y += 3;
+      y = this.drawWrappedText(doc, taxWords, left, y, {
+        width: contentWidth,
+        font: 'Helvetica-Bold',
+        size: 8,
+        color: '#1A1A1A',
+      });
+      y += 8;
       this.drawRule(doc, y);
       y += 8;
 
-      // Bank
-      doc.font('Helvetica-Bold').fontSize(8).fillColor('#9A7B2F').text("Company's Bank Details", left, y);
-      y += 11;
-      doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
+      // Bank (left) + signatory/seal (right) — side-by-side so nothing overlaps or clips
+      const sealSize = 72;
+      const signColW = contentWidth * 0.4;
+      const bankColW = contentWidth - signColW - 12;
+      const signX = left + contentWidth - signColW;
+      const footerTop = y;
+
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#9A7B2F').text("Company's Bank Details", left, footerTop);
+      let bankY = footerTop + 12;
       const bankLines: [string, string][] = [
         ["A/c Holder's Name", BANK.accountName],
         ['Bank Name', BANK.bankName],
         ['A/c No.', BANK.accountNumber],
-        ['Branch & IFS Code', `${BANK.branch} & ${BANK.ifsc}`],
+        ['Branch', BANK.branch],
+        ['IFS Code', BANK.ifsc],
       ];
       if (BANK.swift) bankLines.push(['SWIFT Code', BANK.swift]);
       for (const [label, value] of bankLines) {
-        doc.font('Helvetica-Bold').text(`${label}:`, left, y, { continued: true, width: 120 });
-        doc.font('Helvetica').text(` ${value}`);
-        y += 10;
+        bankY = this.drawLabelValue(doc, label, value, left, bankY, bankColW);
       }
 
-      y += 8;
-      this.drawRule(doc, y);
-      y += 10;
+      doc.font('Helvetica').fontSize(7).fillColor('#1A1A1A');
+      doc.text(`for ${COMPANY.legalName}`, signX, footerTop, { width: signColW, align: 'center' });
 
-      // Signatory + seal
-      const signX = left + contentWidth * 0.55;
-      doc.font('Helvetica').fontSize(7.5).fillColor('#1A1A1A');
-      doc.text(`for ${COMPANY.legalName}`, signX, y, { width: contentWidth * 0.45, align: 'center' });
+      const sealCy = footerTop + 16 + sealSize / 2;
+      const sealCx = signX + signColW / 2;
+      this.drawSealStamp(doc, sealCx, sealCy, sealSize);
 
-      const seal = this.sealPath();
-      if (seal) {
-        const sealSize = 72;
-        doc.image(seal, signX + (contentWidth * 0.45 - sealSize) / 2, y + 12, { width: sealSize });
-        y += sealSize + 18;
-      } else {
-        y += 50;
-      }
-
-      doc.font('Helvetica-Bold').fontSize(8).text('Authorised Signatory', signX, y, {
-        width: contentWidth * 0.45,
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#1A1A1A');
+      doc.text('Authorised Signatory', signX, footerTop + 16 + sealSize + 6, {
+        width: signColW,
         align: 'center',
       });
 
