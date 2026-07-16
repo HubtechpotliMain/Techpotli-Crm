@@ -80,9 +80,7 @@ export default function LeadDetailPage() {
   const [showActivity, setShowActivity] = useState(false);
   const [showLost, setShowLost] = useState(false);
   const [showQuotation, setShowQuotation] = useState(false);
-  const [showEmailDraft, setShowEmailDraft] = useState(false);
   const [showMore, setShowMore] = useState(false);
-  const [emailDraft, setEmailDraft] = useState<{ subject: string; body: string; to: string | null } | null>(null);
   const [lostReason, setLostReason] = useState("");
   const [assignForm, setAssignForm] = useState({ assignedToId: "", followUpDate: "", priority: "MEDIUM", remarks: "" });
   const [activityForm, setActivityForm] = useState({
@@ -192,18 +190,6 @@ export default function LeadDetailPage() {
       patchDetailItem(queryClient, leadKey, { status: "LOST", lostReason: lostReason.trim() });
       setShowLost(false);
       setLostReason("");
-    },
-  });
-
-  const draftEmailMutation = useMutation({
-    mutationFn: async () => {
-      const res = await api.post<{ subject: string; body: string; to: string | null }>(`/ai/leads/${id}/draft-email`);
-      return res.data;
-    },
-    onSuccess: (draft) => {
-      setEmailDraft(draft);
-      setShowEmailDraft(true);
-      setShowMore(false);
     },
   });
 
@@ -361,15 +347,14 @@ export default function LeadDetailPage() {
                           <UserCheck className="h-3.5 w-3.5" /> Assign
                         </button>
                       ) : null}
-                      <button
-                        type="button"
-                        onClick={() => draftEmailMutation.mutate()}
-                        disabled={draftEmailMutation.isPending}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-muted disabled:opacity-60"
+                      <Link
+                        href={`/emails?recipientType=lead&recipientId=${id}&purpose=FOLLOW_UP`}
+                        onClick={() => setShowMore(false)}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-muted"
                       >
                         <Mail className="h-3.5 w-3.5" />
-                        {draftEmailMutation.isPending ? "Drafting…" : "Draft email"}
-                      </button>
+                        Open in Email Center
+                      </Link>
                       <button
                         type="button"
                         onClick={() => { setShowLost(true); setShowMore(false); }}
@@ -615,31 +600,6 @@ export default function LeadDetailPage() {
             setShowQuotation(false);
           }}
         />
-      </Modal>
-
-      <Modal open={showEmailDraft} onClose={() => setShowEmailDraft(false)} title="AI follow-up email draft" size="lg">
-        {draftEmailMutation.isError ? (
-          <p className="mb-3 text-sm text-red-500">{mutationError(draftEmailMutation.error)}</p>
-        ) : null}
-        {emailDraft ? (
-          <div className="space-y-4">
-            <FormField label="To">
-              <TextInput value={emailDraft.to ?? ""} onChange={() => undefined} disabled />
-            </FormField>
-            <FormField label="Subject">
-              <TextInput value={emailDraft.subject} onChange={() => undefined} disabled />
-            </FormField>
-            <FormField label="Body">
-              <div
-                className="min-h-[160px] rounded-lg border border-border bg-muted/30 p-3 text-sm prose prose-sm dark:prose-invert max-w-none"
-                dangerouslySetInnerHTML={{ __html: emailDraft.body }}
-              />
-            </FormField>
-            <p className="text-xs text-muted-foreground">Copy and edit before sending from your email client or customer email panel.</p>
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">Generating draft…</p>
-        )}
       </Modal>
 
       <Modal open={showLost} onClose={() => setShowLost(false)} title="Mark lead as lost">

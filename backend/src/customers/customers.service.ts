@@ -17,6 +17,7 @@ import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
 import {
+  buildCustomerNoticeBodyFragment,
   buildCustomerNoticeHtml,
   CUSTOMER_NOTIFY_TEMPLATES,
   CustomerEmailReason,
@@ -1142,12 +1143,24 @@ export class CustomersService {
 
   async getNotificationDraft(customerId: string, reason: CustomerEmailReason, notes?: string) {
     const data = await this.buildNotificationEmailData(customerId, reason, notes);
+    const warnings: string[] = [];
+    if (
+      data.pendingTotal <= 0 &&
+      (reason === 'PAYMENT_PENDING' || reason === 'PAYMENT_OVERDUE')
+    ) {
+      warnings.push('No outstanding balance found — review amounts before sending.');
+    }
+    if (reason === 'RENEWAL_DUE' && data.payments.length === 0 && data.invoices.length === 0 && !data.notes?.includes('Upcoming renewals')) {
+      warnings.push('No pending renewals or invoices found — review the message before sending.');
+    }
     return {
       to: data.customer.email,
       subject: getCustomerNoticeSubject(reason),
-      body: buildCustomerNoticeHtml(data),
+      body: buildCustomerNoticeBodyFragment(data),
       contactName: data.customer.ownerName,
       companyName: data.customer.companyName,
+      warnings,
+      generatedBy: 'notice-template' as const,
     };
   }
 
@@ -1211,7 +1224,7 @@ export class CustomersService {
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) throw new NotFoundException('Customer not found');
 
-    const [payments, invoices] = await Promise.all([
+    const [payments, invoices, renewals] = await Promise.all([
       this.prisma.payment.findMany({
         where: {
           customerId,
@@ -1227,13 +1240,58 @@ export class CustomersService {
         },
         orderBy: { dueDate: 'asc' },
       }),
+      reason === 'RENEWAL_DUE'
+        ? this.prisma.renewal.findMany({
+            where: {
+              customerId,
+              status: { in: ['ACTIVE', 'DUE_SOON', 'OVERDUE'] },
+            },
+            orderBy: { renewalDate: 'asc' },
+            take: 5,
+          })
+        : Promise.resolve(
+            [] as {
+              id: string;
+              type: string;
+              amount: { toString(): string } | null;
+              renewalDate: Date;
+            }[],
+          ),
     ]);
 
     const totalFromPayments = payments.reduce((sum, p) => sum + Number(p.pendingAmount), 0);
     const totalFromInvoices = invoices.reduce((sum, inv) => sum + Number(inv.grandTotal), 0);
-    const computedTotal = totalFromPayments > 0 ? totalFromPayments : totalFromInvoices;
+    const totalFromRenewals = renewals.reduce((sum, r) => sum + Number(r.amount ?? 0), 0);
+    let computedTotal = totalFromPayments > 0 ? totalFromPayments : totalFromInvoices;
+    if (reason === 'RENEWAL_DUE' && computedTotal <= 0 && totalFromRenewals > 0) {
+      computedTotal = totalFromRenewals;
+    }
 
     const websiteUrl = customer.liveWebsiteLink || customer.domain || null;
+
+    const renewalNotes =
+      reason === 'RENEWAL_DUE' && renewals.length
+        ? renewals
+            .map((r) => {
+              const label = String(r.type).replaceAll('_', ' ');
+              const amt = r.amount != null ? `₹${Number(r.amount).toLocaleString('en-IN')}` : '';
+              const when = r.renewalDate
+                ? new Date(r.renewalDate).toLocaleDateString('en-IN', {
+                    day: '2-digit',
+                    month: 'short',
+                    year: 'numeric',
+                  })
+                : '';
+              return [label, amt, when].filter(Boolean).join(' · ');
+            })
+            .join('; ')
+        : '';
+
+    const mergedNotes = [notes?.trim(), renewalNotes ? `Upcoming renewals: ${renewalNotes}` : '']
+      .filter(Boolean)
+      .join('\n')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
 
     return {
       reason,
@@ -1255,7 +1313,7 @@ export class CustomersService {
         status: inv.status,
       })),
       websiteUrl,
-      notes: notes?.trim() ? notes.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;') : undefined,
+      notes: mergedNotes || undefined,
     };
   }
 }

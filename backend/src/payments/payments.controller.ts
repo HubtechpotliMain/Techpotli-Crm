@@ -67,8 +67,14 @@ export class PaymentsController {
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
-    return this.payments.findOne(id, user.role, user.sub);
+  findOne(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Query('includeProof') includeProof?: string,
+  ) {
+    return this.payments.findOne(id, user.role, user.sub, {
+      includeProof: includeProof === '1' || includeProof === 'true',
+    });
   }
 
   @Post()

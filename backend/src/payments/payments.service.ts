@@ -364,8 +364,16 @@ export class PaymentsService {
     if (!current) throw new NotFoundException('Payment not found');
 
     const isOwner = current.createdById === userId;
-    if (!this.isAdmin(userRole) && !isOwner) {
+    const admin = this.isAdmin(userRole);
+    if (!admin && !isOwner) {
       throw new ForbiddenException('You can only edit your own payments');
+    }
+
+    if (!admin && dto.customerId !== undefined) {
+      throw new ForbiddenException('Only admins can change the customer on a collection');
+    }
+    if (!admin && dto.verify === true) {
+      throw new ForbiddenException('Only admins can verify collections');
     }
 
     const merged = {
@@ -382,14 +390,24 @@ export class PaymentsService {
         ? { totalAmount: total, paidAmount: paid, pendingAmount: pending, status }
         : {}),
       ...(dto.status !== undefined ? { status } : {}),
+      ...(dto.bookingAmount !== undefined ? { bookingAmount: dto.bookingAmount } : {}),
       ...(dto.paymentMethod !== undefined ? { paymentMethod: dto.paymentMethod } : {}),
       ...(dto.transactionId !== undefined ? { transactionId: dto.transactionId?.trim() || null } : {}),
       ...(dto.notes !== undefined ? { notes: dto.notes?.trim() || null } : {}),
       ...(dto.proofS3Key !== undefined ? { proofS3Key: dto.proofS3Key || null } : {}),
       ...(dto.proofFilename !== undefined ? { proofFilename: dto.proofFilename || null } : {}),
       ...(dto.proofMimeType !== undefined ? { proofMimeType: dto.proofMimeType || null } : {}),
-      ...(dto.invoiceId !== undefined ? { invoice: dto.invoiceId ? { connect: { id: dto.invoiceId } } : { disconnect: true } } : {}),
+      ...(dto.invoiceId !== undefined
+        ? { invoice: dto.invoiceId ? { connect: { id: dto.invoiceId } } : { disconnect: true } }
+        : {}),
+      ...(dto.dueDate !== undefined
+        ? { dueDate: dto.dueDate ? new Date(dto.dueDate) : null }
+        : {}),
     };
+
+    if (admin && dto.customerId) {
+      data.customer = { connect: { id: dto.customerId } };
+    }
 
     if (dto.collectedAt) {
       data.collectedAt = new Date(dto.collectedAt);
@@ -401,7 +419,7 @@ export class PaymentsService {
       data.paidDate = data.collectedAt ?? current.collectedAt ?? new Date();
     }
 
-    const verifying = dto.verify === true && this.isAdmin(userRole);
+    const verifying = dto.verify === true && admin;
     if (verifying) {
       data.verifiedAt = new Date();
       data.verifiedBy = { connect: { id: userId } };
@@ -415,6 +433,9 @@ export class PaymentsService {
 
     if (payment.invoiceId) {
       await this.syncInvoiceFromPayment(payment.invoiceId);
+    }
+    if (current.invoiceId && current.invoiceId !== payment.invoiceId) {
+      await this.syncInvoiceFromPayment(current.invoiceId);
     }
 
     if (verifying) {

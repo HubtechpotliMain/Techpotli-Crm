@@ -118,6 +118,45 @@ export function getCustomerNoticeSubject(reason: CustomerEmailReason) {
   return CUSTOMER_NOTIFY_TEMPLATES[reason].subject;
 }
 
+/** Editable fragment (no branded shell) for Email Center / TipTap. */
+export function buildCustomerNoticeBodyFragment(data: CustomerNoticeData): string {
+  const tpl = CUSTOMER_NOTIFY_TEMPLATES[data.reason];
+  const colors = urgencyColor(tpl.urgency);
+
+  const paymentRows = data.payments
+    .slice(0, 5)
+    .map(
+      (p) =>
+        `<li>Payment · ${p.status} — ${formatMoney(p.pendingAmount)} (due ${formatDate(p.dueDate)})</li>`,
+    )
+    .join('');
+
+  const invoiceRows = data.invoices
+    .slice(0, 5)
+    .map(
+      (inv) =>
+        `<li>${inv.invoiceNumber} — ${formatMoney(inv.grandTotal)} (due ${formatDate(inv.dueDate)})</li>`,
+    )
+    .join('');
+
+  const detailsList =
+    data.payments.length || data.invoices.length
+      ? `<p><strong>Outstanding details</strong></p><ul>${paymentRows}${invoiceRows}</ul>`
+      : '';
+
+  const notesBlock = data.notes
+    ? `<p><strong>Note from TechPotli:</strong> ${data.notes}</p>`
+    : '';
+
+  return `
+    <p><strong>${colors.badge}</strong> — Total outstanding: ${formatMoney(data.pendingTotal)}</p>
+    ${buildBodyCopy(data)}
+    ${detailsList}
+    ${notesBlock}
+    <p><strong>How to pay:</strong> Reply to this email or contact us with your payment reference. Bank details are available on your invoice PDF.</p>
+  `.trim();
+}
+
 export function buildCustomerNoticeHtml(data: CustomerNoticeData) {
   const tpl = CUSTOMER_NOTIFY_TEMPLATES[data.reason];
   const colors = urgencyColor(tpl.urgency);

@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
+import { Pencil } from "lucide-react";
 import { api } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api-error";
 import { formatDate, formatLabel, formatMoney } from "@/lib/format";
@@ -13,20 +14,33 @@ import { queryRetryDelay, shouldRetryQuery } from "@/lib/query-retry";
 import { GlassCard } from "@/components/ui/glass-card";
 import { PageHeader } from "@/components/dashboard/page-header";
 import { CustomerDetailSkeleton } from "@/components/ui/skeleton";
+import { Modal } from "@/components/ui/modal";
+import { PaymentForm } from "@/components/payments/payment-form";
 import { useAuthReady } from "@/hooks/use-auth-ready";
 import { useAuthStore } from "@/store/auth-store";
 import { isAdmin } from "@/lib/roles";
 import { DocumentPreviewModal } from "@/components/ui/document-preview-modal";
 
 type PaymentDetail = Record<string, unknown> & {
-  customer?: { id?: string; companyName?: string };
+  customer?: { id?: string; companyName?: string; phone?: string; email?: string };
   invoice?: { id?: string; invoiceNumber?: string };
-  createdBy?: { name?: string };
+  createdBy?: { id?: string; name?: string };
+  createdById?: string;
   verifiedBy?: { name?: string };
   proofUrl?: string | null;
   proofS3Key?: string | null;
+  proofFilename?: string | null;
   proofMimeType?: string | null;
+  bookingAmount?: unknown;
+  dueDate?: unknown;
 };
+
+function toDateInput(value: unknown) {
+  if (!value) return "";
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toISOString().slice(0, 10);
+}
 
 export default function PaymentDetailPage() {
   const params = useParams();
@@ -34,13 +48,17 @@ export default function PaymentDetailPage() {
   const queryClient = useQueryClient();
   const id = String(params.id);
   const { authReady } = useAuthReady();
-  const adminView = isAdmin(useAuthStore((s) => s.user?.role));
+  const user = useAuthStore((s) => s.user);
+  const adminView = isAdmin(user?.role);
   const [showProof, setShowProof] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
 
   const { data, isLoading, isFetching, error, failureCount } = useQuery({
     queryKey: ["payment", id],
     queryFn: async () => {
-      const res = await api.get<PaymentDetail>(`/payments/${id}`);
+      const res = await api.get<PaymentDetail>(`/payments/${id}`, {
+        params: { includeProof: true },
+      });
       return res.data;
     },
     enabled: authReady && !isTempId(id),
@@ -56,6 +74,7 @@ export default function PaymentDetailPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["payment", id] });
       void queryClient.invalidateQueries({ queryKey: ["payments"] });
+      void queryClient.invalidateQueries({ queryKey: ["payments-summary"] });
     },
   });
 
@@ -108,6 +127,9 @@ export default function PaymentDetailPage() {
     return <CustomerDetailSkeleton />;
   }
 
+  const ownerId = String(data.createdById ?? data.createdBy?.id ?? "");
+  const canEdit = adminView || (user?.id != null && ownerId === user.id);
+
   const mutationError =
     verifyMutation.isError
       ? getApiErrorMessage(verifyMutation.error, "Verification failed")
@@ -132,6 +154,16 @@ export default function PaymentDetailPage() {
       ) : null}
 
       <div className="flex flex-wrap gap-2">
+        {canEdit ? (
+          <button
+            type="button"
+            onClick={() => setShowEdit(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            Edit collection
+          </button>
+        ) : null}
         {data.invoice?.id ? (
           <button
             type="button"
@@ -145,7 +177,7 @@ export default function PaymentDetailPage() {
             type="button"
             onClick={() => invoiceMutation.mutate()}
             disabled={invoiceMutation.isPending}
-            className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-60"
+            className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-60"
           >
             {invoiceMutation.isPending ? "Generating…" : "Generate invoice"}
           </button>
@@ -225,6 +257,56 @@ export default function PaymentDetailPage() {
         s3Key={String(data.proofS3Key ?? "")}
         mimeType={String(data.proofMimeType ?? "")}
       />
+
+      <Modal
+        open={showEdit}
+        onOpenChange={setShowEdit}
+        title="Edit collection"
+        description={adminView ? "Update any field on this collection." : "Update your collection details."}
+        size="lg"
+        accent="emerald"
+      >
+        <PaymentForm
+          mode="edit"
+          paymentId={id}
+          allowCustomerChange={adminView}
+          lockCustomer={!adminView}
+          existingProofUrl={data.proofUrl}
+          defaultCustomerOption={
+            data.customer?.id
+              ? {
+                  value: String(data.customer.id),
+                  label: String(data.customer.companyName ?? "Customer"),
+                  sublabel:
+                    [data.customer.phone, data.customer.email].filter(Boolean).join(" · ") || undefined,
+                }
+              : null
+          }
+          defaultValues={{
+            customerId: String(data.customer?.id ?? data.customerId ?? ""),
+            invoiceId: String(data.invoiceId ?? data.invoice?.id ?? ""),
+            paidAmount: String(data.paidAmount ?? ""),
+            totalAmount: String(data.totalAmount ?? ""),
+            bookingAmount: data.bookingAmount != null ? String(data.bookingAmount) : "",
+            status: String(data.status ?? "PAID"),
+            paymentMethod: String(data.paymentMethod ?? "UPI"),
+            transactionId: String(data.transactionId ?? ""),
+            notes: String(data.notes ?? ""),
+            collectedAt: toDateInput(data.collectedAt ?? data.createdAt),
+            dueDate: toDateInput(data.dueDate),
+            proofKey: String(data.proofS3Key ?? ""),
+            proofFilename: String(data.proofFilename ?? ""),
+            proofMimeType: String(data.proofMimeType ?? ""),
+          }}
+          onCancel={() => setShowEdit(false)}
+          onSuccess={() => {
+            setShowEdit(false);
+            void queryClient.invalidateQueries({ queryKey: ["payment", id] });
+            void queryClient.invalidateQueries({ queryKey: ["payments"] });
+            void queryClient.invalidateQueries({ queryKey: ["payments-summary"] });
+          }}
+        />
+      </Modal>
     </div>
   );
 }

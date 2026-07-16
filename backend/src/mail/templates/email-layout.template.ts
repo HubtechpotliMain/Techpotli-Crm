@@ -145,3 +145,21 @@ export function isFullHtmlDocument(html: string): boolean {
   const lower = html.trim().toLowerCase();
   return lower.includes('<!doctype') || lower.includes('<html');
 }
+
+/** Extract editable inner content from a full branded email document. */
+export function extractEditableBodyFromHtml(html: string): string {
+  const raw = String(html ?? '').trim();
+  if (!raw) return '';
+  if (!isFullHtmlDocument(raw)) return raw;
+
+  // Prefer the white body cell content from branded layout
+  const bodyCellMatch = raw.match(
+    /background:#FFFFFF;padding:32px 28px[^>]*>([\s\S]*?)<\/td>\s*<\/tr>\s*<!-- Footer -->/i,
+  );
+  if (bodyCellMatch?.[1]) return bodyCellMatch[1].trim();
+
+  const bodyMatch = raw.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+  if (bodyMatch?.[1]) return bodyMatch[1].trim();
+
+  return raw;
+}

@@ -125,8 +125,6 @@ export default function CustomerDetailPage() {
   const id = String(params.id);
   const [tab, setTab] = useState<Tab>("overview");
   const [showProject, setShowProject] = useState(false);
-  const [showEmailDraft, setShowEmailDraft] = useState(false);
-  const [emailDraft, setEmailDraft] = useState<{ subject: string; body: string; to: string | null } | null>(null);
   const [favorited, setFavorited] = useState(false);
 
   const { data, isLoading, isFetching, error, failureCount } = useQuery({
@@ -152,17 +150,6 @@ export default function CustomerDetailPage() {
   useEffect(() => {
     setFavorited(favorites.some((f) => String(f.customer.id) === id));
   }, [favorites, id]);
-
-  const draftEmailMutation = useMutation({
-    mutationFn: async () => {
-      const res = await api.post<{ subject: string; body: string; to: string | null }>(`/ai/customers/${id}/draft-email`);
-      return res.data;
-    },
-    onSuccess: (draft) => {
-      setEmailDraft(draft);
-      setShowEmailDraft(true);
-    },
-  });
 
   const favoriteMutation = useOptimisticMutation({
     mutationFn: async () => {
@@ -261,14 +248,12 @@ export default function CustomerDetailPage() {
             >
               <Star className={`h-4 w-4 ${favorited ? "fill-accent text-accent" : "text-muted-foreground"}`} />
             </button>
-            <button
-              type="button"
-              onClick={() => draftEmailMutation.mutate()}
-              disabled={draftEmailMutation.isPending}
-              className="rounded-lg border border-primary/30 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/5 disabled:opacity-60"
+            <Link
+              href={`/emails?recipientType=customer&recipientId=${id}&purpose=CHECK_IN`}
+              className="rounded-lg border border-primary/30 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/5"
             >
-              {draftEmailMutation.isPending ? "Drafting…" : "Draft check-in email"}
-            </button>
+              Open in Email Center
+            </Link>
             <button
               type="button"
               onClick={() => setShowProject(true)}
@@ -341,22 +326,6 @@ export default function CustomerDetailPage() {
       {tab === "timeline" ? <CustomerTimelinePanel customerId={id} /> : null}
       {tab === "callLogs" ? <CustomerCallLogsPanel customerId={id} /> : null}
       {tab === "edit" ? <CustomerForm customer={data} /> : null}
-
-      <Modal open={showEmailDraft} onClose={() => setShowEmailDraft(false)} title="AI check-in email draft" size="lg">
-        {emailDraft ? (
-          <div className="space-y-4 text-sm">
-            <p><span className="font-medium">To:</span> {emailDraft.to ?? "—"}</p>
-            <p><span className="font-medium">Subject:</span> {emailDraft.subject}</p>
-            <div
-              className="min-h-[160px] rounded-lg border border-border bg-muted/30 p-3 prose prose-sm dark:prose-invert max-w-none"
-              dangerouslySetInnerHTML={{ __html: emailDraft.body }}
-            />
-            <p className="text-xs text-muted-foreground">Copy and edit before sending from the Notes or Email tab.</p>
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">Generating draft…</p>
-        )}
-      </Modal>
 
       <Modal open={showProject} onClose={() => setShowProject(false)} title="New project" size="lg">
         <ProjectForm

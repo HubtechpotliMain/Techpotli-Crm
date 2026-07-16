@@ -12,6 +12,11 @@ import {
 
 export class UpdatePaymentDto {
   @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  customerId?: string;
+
+  @IsOptional()
   @IsNumber()
   @Min(0)
   paidAmount?: number;
@@ -20,6 +25,11 @@ export class UpdatePaymentDto {
   @IsNumber()
   @Min(0)
   totalAmount?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  bookingAmount?: number;
 
   @IsOptional()
   @IsEnum(PaymentStatus)
@@ -52,6 +62,10 @@ export class UpdatePaymentDto {
   @IsOptional()
   @IsDateString()
   collectedAt?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dueDate?: string;
 
   @IsOptional()
   @IsBoolean()

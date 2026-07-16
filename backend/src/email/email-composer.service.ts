@@ -15,10 +15,21 @@ import {
   listPurposes,
 } from './email-purposes';
 import {
+  extractEditableBodyFromHtml,
   isFullHtmlDocument,
   wrapEmailBodyFragment,
 } from '../mail/templates/email-layout.template';
 import { buildBuiltInDraft } from './built-in-email-templates';
+
+type ComposeDraft = {
+  to: string | null;
+  subject: string;
+  body: string;
+  contactName?: string | null;
+  companyName?: string | null;
+  warnings?: string[];
+  generatedBy?: 'built-in' | 'notice-template' | 'ai';
+};
 
 @Injectable()
 export class EmailComposerService {
@@ -112,20 +123,32 @@ export class EmailComposerService {
     });
   }
 
-  async compose(recipientType: RecipientType, recipientId: string, purpose: string) {
+  async compose(recipientType: RecipientType, recipientId: string, purpose: string): Promise<ComposeDraft> {
     const allowed = listPurposes(recipientType === 'customer' ? 'customer' : 'lead').some((p) => p.id === purpose);
     if (!allowed) throw new BadRequestException('Invalid email purpose');
 
+    let draft: ComposeDraft;
     if (recipientType === 'customer' && CUSTOMER_PAYMENT_PURPOSES.has(purpose)) {
-      return this.customers.getNotificationDraft(
+      draft = await this.customers.getNotificationDraft(
         recipientId,
         purpose as CustomerEmailReason,
       );
+    } else if (recipientType === 'lead') {
+      draft = await this.composeLeadDraft(recipientId, purpose);
+    } else {
+      draft = await this.composeCustomerAiDraft(recipientId, purpose);
     }
-    if (recipientType === 'lead') {
-      return this.composeLeadDraft(recipientId, purpose);
-    }
-    return this.composeCustomerAiDraft(recipientId, purpose);
+
+    return {
+      ...draft,
+      body: this.toEditableBody(draft.body),
+      warnings: draft.warnings ?? [],
+      generatedBy: draft.generatedBy ?? 'built-in',
+    };
+  }
+
+  private toEditableBody(html: string): string {
+    return extractEditableBodyFromHtml(html);
   }
 
   async send(
@@ -212,6 +235,7 @@ export class EmailComposerService {
         body: built.bodyHtml,
         contactName: lead.contactName,
         companyName: lead.companyName,
+        generatedBy: 'built-in' as const,
       };
     }
 
@@ -259,6 +283,7 @@ export class EmailComposerService {
         body: built.bodyHtml,
         contactName: customer.ownerName,
         companyName: customer.companyName,
+        generatedBy: 'built-in' as const,
       };
     }
 
@@ -321,6 +346,7 @@ Return JSON only: {"subject":"...","body":"HTML with <p> tags only, no markdown"
       body,
       contactName,
       companyName,
+      generatedBy: 'ai' as const,
     };
   }
 

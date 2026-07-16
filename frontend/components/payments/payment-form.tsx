@@ -22,11 +22,13 @@ type PaymentFormData = {
   invoiceId: string;
   paidAmount: string;
   totalAmount: string;
+  bookingAmount: string;
   status: string;
   paymentMethod: string;
   transactionId: string;
   notes: string;
   collectedAt: string;
+  dueDate: string;
   proofKey: string;
   proofFilename: string;
   proofMimeType: string;
@@ -37,11 +39,13 @@ const emptyForm: PaymentFormData = {
   invoiceId: "",
   paidAmount: "",
   totalAmount: "",
+  bookingAmount: "",
   status: "PAID",
   paymentMethod: "UPI",
   transactionId: "",
   notes: "",
   collectedAt: new Date().toISOString().slice(0, 10),
+  dueDate: "",
   proofKey: "",
   proofFilename: "",
   proofMimeType: "",
@@ -50,11 +54,22 @@ const emptyForm: PaymentFormData = {
 export function PaymentForm({
   defaultValues,
   defaultCustomerOption,
+  paymentId,
+  mode = "create",
+  lockCustomer = false,
+  allowCustomerChange = true,
+  existingProofUrl,
   onSuccess,
   onCancel,
 }: {
   defaultValues?: Partial<PaymentFormData>;
   defaultCustomerOption?: CustomerOption | null;
+  paymentId?: string;
+  mode?: "create" | "edit";
+  /** Force customer field read-only (employees editing own collection) */
+  lockCustomer?: boolean;
+  allowCustomerChange?: boolean;
+  existingProofUrl?: string | null;
   onSuccess?: (data: Record<string, unknown>) => void;
   onCancel?: () => void;
 }) {
@@ -66,12 +81,15 @@ export function PaymentForm({
   const [localPreview, setLocalPreview] = useState<string | null>(null);
   const [saveStage, setSaveStage] = useState<"idle" | "saving" | "done">("idle");
 
+  const isEdit = mode === "edit" && Boolean(paymentId);
+  const customerLocked = lockCustomer || !allowCustomerChange || !!defaultValues?.customerId;
+
   const initial = { ...emptyForm, ...defaultValues };
   const draftScope =
     defaultValues?.invoiceId ?? defaultValues?.customerId ?? "general";
-  const draftEnabled = !defaultValues?.invoiceId && !defaultValues?.customerId;
+  const draftEnabled = !isEdit && !defaultValues?.invoiceId && !defaultValues?.customerId;
   const { form, setForm, restored, dirty, clearDraft, discardDraft } = useFormDraft({
-    draftKey: `payment:new:${draftScope}`,
+    draftKey: isEdit ? `payment:edit:${paymentId}` : `payment:new:${draftScope}`,
     initial,
     enabled: draftEnabled,
   });
@@ -157,25 +175,41 @@ export function PaymentForm({
       setSaveStage("saving");
       const paid = Number(form.paidAmount);
       const total = form.totalAmount ? Number(form.totalAmount) : paid;
-      const res = await api.post("/payments", {
+      const payload = {
         customerId: form.customerId.trim(),
         invoiceId: form.invoiceId || undefined,
         paidAmount: paid,
         totalAmount: total,
+        bookingAmount: form.bookingAmount ? Number(form.bookingAmount) : undefined,
         status: form.status,
         paymentMethod: form.paymentMethod || undefined,
         transactionId: form.transactionId.trim() || undefined,
         notes: form.notes.trim() || undefined,
         collectedAt: form.collectedAt ? new Date(form.collectedAt).toISOString() : undefined,
+        dueDate: form.dueDate ? new Date(form.dueDate).toISOString() : undefined,
         proofS3Key: form.proofKey || undefined,
         proofFilename: form.proofFilename || undefined,
         proofMimeType: form.proofMimeType || undefined,
-      });
+      };
+
+      if (isEdit && paymentId) {
+        const { customerId, ...rest } = payload;
+        const body = allowCustomerChange ? { ...rest, customerId } : rest;
+        const res = await api.patch(`/payments/${paymentId}`, body);
+        return res.data;
+      }
+
+      const res = await api.post("/payments", payload);
       return res.data;
     },
-    snapshotKeys: [["payments"]],
-    invalidateKeys: [["payments"], ["payments-summary"]],
+    snapshotKeys: [["payments"], ...(paymentId ? [["payment", paymentId]] : [])],
+    invalidateKeys: [
+      ["payments"],
+      ["payments-summary"],
+      ...(paymentId ? [["payment", paymentId]] : []),
+    ],
     onMutate: () => {
+      if (isEdit) return {};
       const tempId = createTempId();
       appendToMatchingLists(queryClient, ["payments"], {
         id: tempId,
@@ -191,13 +225,13 @@ export function PaymentForm({
     onSuccess: (data) => {
       setSaveStage("done");
       clearDraft();
-      clearProof();
+      if (!isEdit) clearProof();
       onSuccess?.(data as Record<string, unknown>);
       setTimeout(() => setSaveStage("idle"), 1500);
     },
     onError: (err) => {
       setSaveStage("idle");
-      setError(getApiErrorMessage(err, "Failed to record payment"));
+      setError(getApiErrorMessage(err, isEdit ? "Failed to update collection" : "Failed to record payment"));
     },
   });
 
@@ -231,10 +265,20 @@ export function PaymentForm({
 
   const uploading = uploadPercent !== null;
   const isBusy = mutation.isPending || uploading;
+  const proofPreviewSrc = localPreview || existingProofUrl || null;
 
   return (
     <form onSubmit={handleSubmit}>
-      <FormShell footer={<FormFooterActions onCancel={onCancel} submitLabel="Record collection" pending={isBusy} pendingLabel="Saving…" />}>
+      <FormShell
+        footer={
+          <FormFooterActions
+            onCancel={onCancel}
+            submitLabel={isEdit ? "Save changes" : "Record collection"}
+            pending={isBusy}
+            pendingLabel="Saving…"
+          />
+        }
+      >
       {restored ? (
         <div className="flex items-center justify-between rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
           <span className="text-muted-foreground">Draft restored from this browser</span>
@@ -253,7 +297,7 @@ export function PaymentForm({
           onChange={(v) => set("customerId", v)}
           label="Company / Customer"
           required
-          lockSelection={!!defaultValues?.customerId}
+          lockSelection={customerLocked}
           defaultOption={defaultCustomerOption}
         />
       </FormSection>
@@ -277,6 +321,17 @@ export function PaymentForm({
         </FormField>
       </div>
 
+      {isEdit || allowCustomerChange ? (
+        <FormField label="Booking amount (₹)">
+          <TextInput
+            value={form.bookingAmount}
+            onChange={(v) => set("bookingAmount", v)}
+            type="number"
+            placeholder="Optional"
+          />
+        </FormField>
+      ) : null}
+
       <div className="grid gap-4 sm:grid-cols-2">
         <FormField label="Payment method">
           <SelectInput
@@ -298,9 +353,14 @@ export function PaymentForm({
         <TextInput value={form.transactionId} onChange={(v) => set("transactionId", v)} />
       </FormField>
 
-      <FormField label="Collection date">
-        <TextInput value={form.collectedAt} onChange={(v) => set("collectedAt", v)} type="date" />
-      </FormField>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <FormField label="Collection date">
+          <TextInput value={form.collectedAt} onChange={(v) => set("collectedAt", v)} type="date" />
+        </FormField>
+        <FormField label="Due date">
+          <TextInput value={form.dueDate} onChange={(v) => set("dueDate", v)} type="date" />
+        </FormField>
+      </div>
 
       <FormField label="Payment proof">
         <input
@@ -313,12 +373,12 @@ export function PaymentForm({
             if (file) void handleProofFile(file);
           }}
         />
-        {hasProof || form.proofFilename ? (
+        {hasProof || form.proofFilename || proofPreviewSrc ? (
           <div className="space-y-2 rounded-lg border border-border p-3">
-            {localPreview ? (
+            {proofPreviewSrc && (form.proofMimeType?.startsWith("image/") || localPreview) ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={localPreview}
+                src={proofPreviewSrc}
                 alt="Proof preview"
                 className="max-h-32 rounded-md object-contain"
               />
@@ -328,7 +388,7 @@ export function PaymentForm({
                 {form.proofKey ? (
                   <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
                 ) : null}
-                <span className="truncate">{form.proofFilename}</span>
+                <span className="truncate">{form.proofFilename || "Existing proof"}</span>
               </span>
               <button
                 type="button"
@@ -342,8 +402,15 @@ export function PaymentForm({
             {uploading ? (
               <UploadProgress percent={uploadPercent ?? 0} label="Uploading proof…" />
             ) : form.proofKey ? (
-              <p className="text-xs text-emerald-600 dark:text-emerald-400">Saved in browser — ready to submit</p>
+              <p className="text-xs text-emerald-600 dark:text-emerald-400">Ready to submit</p>
             ) : null}
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className="text-xs font-medium text-primary hover:underline"
+            >
+              Replace proof
+            </button>
           </div>
         ) : (
           <button
@@ -360,7 +427,7 @@ export function PaymentForm({
           <UploadProgress percent={uploadPercent ?? 0} label="Uploading proof…" className="mt-2" />
         ) : null}
         <p className="mt-1 text-xs text-muted-foreground">
-          Proof uploads immediately and is saved locally. Required for collections of ₹1,000 or more when status is Paid.
+          Proof required for collections of ₹1,000 or more when status is Paid.
         </p>
       </FormField>
 
